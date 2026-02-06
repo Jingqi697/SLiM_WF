@@ -1,0 +1,209 @@
+// ============================================================
+// Phase 2: Inversion fate under WF with internal DCO recombination
+// Inversion remains intact; only central core recombines
+// ============================================================
+
+initialize() {
+
+    // ------------------------
+    // Parameters
+    // ------------------------
+    defineConstant("K_ANCESTRAL", 5000);
+    defineConstant("L", 23e6);
+    defineConstant("REC_RATE", 2e-8);
+
+    // Inversion coordinates (In(2L)t)
+    defineConstant("INV_START", 2e6);
+    defineConstant("INV_END",   13e6);
+
+    // Central ~4 Mb DCO-permissive core
+    defineConstant("INV_CORE_START", 5.5e6);
+    defineConstant("INV_CORE_END",   9.5e6);
+
+    // Inversion marker (outside core, inside inversion)
+    defineConstant("INV_MARKER_POS", 3e6);
+
+    // Deleterious mutation parameters
+    defineConstant("MU_DELETERIOUS", 1e-8);
+    defineConstant("DFE_SHAPE", 0.2);
+    defineConstant("DFE_MEAN_S", -0.04);
+    defineConstant("H_DOMINANCE", 0.0);
+
+    // Tracking
+    defineConstant("INV_TRACKING_GENS", 10 * K_ANCESTRAL);
+    defineConstant("LOG_INTERVAL", 1000);
+
+    if (!exists("jobID")) defineConstant("jobID", 1);
+
+    // ------------------------
+    // Model setup
+    // ------------------------
+    initializeSLiMModelType("WF");
+
+    // Deleterious mutations
+    initializeMutationType("m2", H_DOMINANCE, "g",
+                           DFE_MEAN_S, DFE_SHAPE);
+    m2.convertToSubstitution = F;
+
+    // Inversion marker
+    initializeMutationType("m3", 0.5, "f", 0.0);
+    m3.convertToSubstitution = F;
+
+    // Genome
+    initializeGenomicElementType("g1", m2, 1.0);
+    initializeGenomicElement(g1, 0, L - 1);
+
+    initializeMutationRate(MU_DELETERIOUS);
+    initializeRecombinationRate(REC_RATE);
+}
+
+// ============================================================
+// Load burn-in population
+// ============================================================
+1 early() {
+
+    sim.readFromPopulationFile(
+        "burnin_state_K=5000_simID=3574899238261820451.txt"
+    );
+
+    // Independent RNG stream per replicate
+    setSeed(getSeed() + jobID);
+    defineConstant("repID", getSeed());
+
+    defineConstant("START_GEN", sim.generation);
+
+    catn("Phase 2 (WF)");
+    catn("Replicate: " + jobID);
+    catn("Loaded burn-in at generation " + START_GEN);
+}
+
+// ============================================================
+// Introduce inversion exactly once
+// ============================================================
+1 late() {
+
+    if (sim.generation == START_GEN) {
+
+        p1.sampleIndividuals(1)
+          .haplosomes[0]
+          .addNewDrawnMutation(m3, INV_MARKER_POS);
+
+        inv_freq = sum(
+            p1.individuals.haplosomes
+              .countOfMutationsOfType(m3)
+        ) / (2.0 * p1.individualCount);
+
+        catn("Generation " + sim.generation +
+             ": Inversion introduced (freq = " + inv_freq + ")");
+    }
+}
+
+// ============================================================
+// Recombination logic: inversion-safe DCOs only in core
+// ============================================================
+recombination() {
+
+    // Same arrangement → normal recombination
+    if (haplosome1.containsMarkerMutation(m3, INV_MARKER_POS) ==
+        haplosome2.containsMarkerMutation(m3, INV_MARKER_POS))
+        return F;
+
+    // Identify breakpoints in DCO-permissive core
+    inCore = (breakpoints > INV_CORE_START) &
+             (breakpoints < INV_CORE_END);
+
+    coreBreaks = breakpoints[inCore];
+
+    // No internal breakpoints → fine
+    if (size(coreBreaks) == 0)
+        return F;
+
+    // Odd number → suppress all internal recombination
+    if (size(coreBreaks) % 2 == 1) {
+        breakpoints = breakpoints[!inCore];
+        return T;
+    }
+
+    // Even number → allow effective DCOs
+    return F;
+}
+
+// ============================================================
+// Track inversion fate
+// ============================================================
+1: late() {
+
+    gensSinceIntro = sim.generation - START_GEN;
+    if (gensSinceIntro < 0)
+        return;
+
+    inv_count = sum(
+        p1.individuals.haplosomes
+          .countOfMutationsOfType(m3)
+    );
+    inv_freq = inv_count / (2.0 * p1.individualCount);
+
+    // Loss
+    if (inv_freq == 0.0) {
+        catn("Generation " + gensSinceIntro +
+             ": Inversion LOST (rep " + jobID + ")");
+        sim.simulationFinished();
+    }
+
+    // Fixation
+    if (inv_freq >= 0.99) {
+        catn("Generation " + gensSinceIntro +
+             ": Inversion FIXED (rep " + jobID + ")");
+        sim.simulationFinished();
+    }
+
+    // Periodic logging
+    if (gensSinceIntro >= 1000 &
+        gensSinceIntro % LOG_INTERVAL == 0) {
+
+        numSTD = 0;
+        numHET = 0;
+        numINV = 0;
+
+        for (ind in p1.individuals) {
+            invCopies = sum(
+                ind.haplosomes.countOfMutationsOfType(m3)
+            );
+            if (invCopies == 0) numSTD = numSTD + 1;
+            else if (invCopies == 1) numHET = numHET + 1;
+            else numINV = numINV + 1;
+        }
+
+        catn("Gen " + gensSinceIntro +
+             " | Job " + jobID +
+             " | Inv freq: " + inv_freq +
+             " | STD: " + numSTD +
+             " HET: " + numHET +
+             " INV: " + numINV);
+    }
+
+    // End of tracking window
+    if (gensSinceIntro == INV_TRACKING_GENS) {
+
+        if (inv_freq > 0.0 & inv_freq < 0.99) {
+
+            catn("SUCCESS: Replicate " + jobID +
+                 " maintained polymorphism");
+            catn("Final inversion frequency: " + inv_freq);
+
+            outfile = "inversion_polymorphic_job=" + jobID +
+                      "_rep=" + repID +
+                      "_freq=" + inv_freq + ".txt";
+
+            sim.outputFull(outfile);
+            catn("Saved: " + outfile);
+        }
+        else {
+            catn("Replicate " + jobID +
+                 " did not maintain polymorphism (freq=" +
+                 inv_freq + ")");
+        }
+
+        sim.simulationFinished();
+    }
+}
