@@ -103,30 +103,45 @@ initialize() {
 // ============================================================
 recombination() {
 
-    // Same arrangement → normal recombination
+    // Same arrangement → normal recombination everywhere
     if (haplosome1.containsMarkerMutation(m3, INV_MARKER_POS) ==
         haplosome2.containsMarkerMutation(m3, INV_MARKER_POS))
         return F;
 
-    // Identify breakpoints in DCO-permissive core
+    // Heterokaryotype (STD / INV)
+
+    // Identify breakpoints inside inversion
+    inInv = (breakpoints > INV_START) &
+            (breakpoints < INV_END);
+
+    // Identify breakpoints inside DCO-permissive core
     inCore = (breakpoints > INV_CORE_START) &
              (breakpoints < INV_CORE_END);
 
     coreBreaks = breakpoints[inCore];
 
-    // No internal breakpoints → fine
-    if (size(coreBreaks) == 0)
+    // Case 1: No breakpoints in inversion → OK
+    if (!any(inInv))
         return F;
 
-    // Odd number → suppress all internal recombination
-    if (size(coreBreaks) % 2 == 1) {
-        breakpoints = breakpoints[!inCore];
+    // Case 2: Breakpoints in inversion but NOT core → suppress all
+    if (any(inInv & !inCore)) {
+        breakpoints = breakpoints[!inInv];
         return T;
     }
 
-    // Even number → allow effective DCOs
+    // Case 3: Breakpoints only in core
+    // Odd number → suppress all core recombination
+    if (size(coreBreaks) % 2 == 1) {
+        breakpoints = breakpoints[!inInv];
+        return T;
+    }
+
+    // Case 4: Even number of core breakpoints → allow DCOs only
+    // (all inversion-external breakpoints already preserved)
     return F;
 }
+
 
 // ============================================================
 // Track inversion fate
